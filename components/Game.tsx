@@ -3,6 +3,7 @@ import Robot from './Robot';
 import { RobotState, MoveType, TurnPhase, CharacterType, GameMode, PlayerUpgrade } from '../types';
 import { INITIAL_ENERGY, MOVE_COSTS, MOVE_NAMES, WIN_MESSAGE, LOSE_MESSAGE, CHARACTERS, LEVEL_CONFIGS, PLAYER_UPGRADES } from '../constants';
 import { resolveTurn, getEnemyMove, generateEndlessEnemy } from '../services/gameLogic';
+import { audioManager } from '../services/audioService';
 
 interface GameProps {
   characterType: CharacterType;
@@ -32,12 +33,11 @@ const UpgradeModal = ({ options, onSelect, onSkip }: { options: PlayerUpgrade[],
             <div className="max-w-5xl w-full">
                 <h2 className="text-4xl font-black text-center text-yellow-400 mb-2">升级核心</h2>
                 <p className="text-center text-gray-400 mb-8">检测到BOSS残骸，请选择一项技术进行融合</p>
-                
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                     {options.map(opt => (
                         <button 
                             key={opt.id} 
-                            onClick={() => onSelect(opt)}
+                            onClick={() => { audioManager.playUI(); onSelect(opt); }}
                             className="bg-gradient-to-b from-gray-800 to-gray-950 border border-white/20 p-6 rounded-xl hover:border-yellow-400 hover:scale-105 transition-all group text-left flex flex-col"
                         >
                             <h3 className="text-xl font-bold text-yellow-200 mb-2 group-hover:text-yellow-400">{opt.name}</h3>
@@ -45,9 +45,8 @@ const UpgradeModal = ({ options, onSelect, onSkip }: { options: PlayerUpgrade[],
                         </button>
                     ))}
                 </div>
-                
                 <div className="flex justify-center">
-                    <button onClick={onSkip} className="text-gray-500 hover:text-white underline">跳过升级</button>
+                    <button onClick={() => { audioManager.playUI(); onSkip(); }} className="text-gray-500 hover:text-white underline">跳过升级</button>
                 </div>
             </div>
         </div>
@@ -57,21 +56,21 @@ const UpgradeModal = ({ options, onSelect, onSkip }: { options: PlayerUpgrade[],
 const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) => {
   const charConfig = CHARACTERS[characterType];
   
-  // Game State
   const [endlessScore, setEndlessScore] = useState(0);
   const [campaignIndex, setCampaignIndex] = useState(0);
   const [upgradeOptions, setUpgradeOptions] = useState<PlayerUpgrade[] | null>(null);
   
   const levelName = gameMode === GameMode.CAMPAIGN 
     ? LEVEL_CONFIGS[campaignIndex]?.name 
-    : (endlessScore > 0 && endlessScore % 10 === 0 ? `BOSS STAGE (Score: ${endlessScore})` : `Endless Wave (Score: ${endlessScore})`);
+    : (endlessScore > 0 && endlessScore % 10 === 0 ? `BOSS STAGE` : `Endless Wave`);
 
   const [roundCount, setRoundCount] = useState(1);
   const [showRoundOverlay, setShowRoundOverlay] = useState(false);
-  
-  // Tooltip State
   const [showEnemyTooltip, setShowEnemyTooltip] = useState(false);
   const [showPlayerTooltip, setShowPlayerTooltip] = useState<PlayerUpgrade | null>(null);
+
+  // Track previous move for Jammer/Mimic logic
+  const [previousPlayerMove, setPreviousPlayerMove] = useState<MoveType>(MoveType.NONE);
 
   const [player, setPlayer] = useState<RobotState>({
     id: 'player',
@@ -87,7 +86,7 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
 
   const [enemy, setEnemy] = useState<RobotState>({
     id: 'enemy',
-    type: 'INIT', // Placeholder
+    type: 'INIT',
     hp: 1,
     maxHp: 1,
     energy: 0,
@@ -95,7 +94,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
     isDead: false,
   });
 
-  // Initialize Enemy on Mount
   useEffect(() => {
     if (gameMode === GameMode.CAMPAIGN) {
         const cfg = LEVEL_CONFIGS[0];
@@ -118,12 +116,10 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
   const [endGameMessage, setEndGameMessage] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll logs
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [battleLog]);
 
-  // Round Start Animation
   useEffect(() => {
       if (turnPhase === TurnPhase.WAITING && !endGameMessage && !upgradeOptions) {
           setShowRoundOverlay(true);
@@ -132,7 +128,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
       }
   }, [roundCount, campaignIndex, endlessScore, turnPhase, endGameMessage, upgradeOptions]);
 
-  // Progression Logic
   const handleEnemyDefeated = () => {
       if (gameMode === GameMode.CAMPAIGN) {
           if (campaignIndex >= LEVEL_CONFIGS.length - 1) {
@@ -153,32 +148,41 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
                   isDead: false
               });
               healPlayer(1);
-              setRoundCount(1); // Reset Round
+              setRoundCount(1);
               setTurnPhase(TurnPhase.WAITING);
+              setPreviousPlayerMove(MoveType.NONE);
           }
       } else {
-          // ENDLESS MODE
           const newScore = endlessScore + 1;
           setEndlessScore(newScore);
-          setBattleLog(prev => [...prev, `敌人已歼灭！当前积分：${newScore}`, `>> HP +1`]);
-          healPlayer(1);
+          setBattleLog(prev => [...prev, `敌人已歼灭！当前积分：${newScore}`]);
+          
+          // Apply Nano Repair Heal
+          if (player.upgrades?.some(u => u.healOnKill)) {
+               healPlayer(1);
+               setBattleLog(prev => [...prev, ">> 纳米修复：生命值 +1"]);
+          }
 
-          // Check for Boss Kill (Reward Upgrade)
           const isBossKill = enemy.type.includes('BOSS');
 
           if (isBossKill) {
-              // Trigger Upgrade UI
+              // Boss Reward: Full Heal + Reset Energy
+              setPlayer(prev => ({
+                  ...prev,
+                  hp: prev.maxHp,
+                  energy: charConfig.initialEnergy, // Reset energy
+                  delayedAttackDamage: 0
+              }));
+              setBattleLog(prev => [...prev, ">> 击败BOSS！生命值回满！能量重置！"]);
+
               const validUpgrades = PLAYER_UPGRADES.filter(u => {
-                  // Filter out invalid upgrades
-                  if (u.id === 'WEAPON_MOD' && characterType === CharacterType.MODEL_J) return false; // J can't use laser
-                  if (u.id === 'WEAPON_MOD' && characterType === CharacterType.MILITARY) return false; // Military already has multi
-                  // Prevent duplicate unique passives? Most stack okay or are bools.
+                  if (u.id === 'WEAPON_MOD' && characterType === CharacterType.MODEL_J) return false;
+                  if (u.id === 'WEAPON_MOD' && characterType === CharacterType.MILITARY) return false;
                   const hasIt = player.upgrades?.some(pu => pu.id === u.id);
-                  if (hasIt && (u.shieldReflect || u.upgradeLaserToMulti || u.costReduction)) return false;
+                  if (hasIt && (u.shieldReflect || u.upgradeLaserToMulti || u.costReduction || u.chargeBonus || u.gainEnergyOnClash || u.criticalLaserChance)) return false;
                   return true;
               });
               
-              // Pick 3 random
               const shuffled = [...validUpgrades].sort(() => 0.5 - Math.random());
               setUpgradeOptions(shuffled.slice(0, 3));
           } else {
@@ -189,8 +193,9 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
 
   const startNextEndlessRound = (score: number) => {
       setEnemy(generateEndlessEnemy(score));
-      setRoundCount(1); // Reset Round
+      setRoundCount(1);
       setTurnPhase(TurnPhase.WAITING);
+      setPreviousPlayerMove(MoveType.NONE);
   };
 
   const healPlayer = (amount: number) => {
@@ -228,39 +233,44 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
 
   const handlePlayerAction = (move: MoveType) => {
     if (turnPhase !== TurnPhase.WAITING) return;
+    audioManager.playUI('click');
 
-    // CALCULATE COST
     let cost = MOVE_COSTS[move];
-    
-    // Character Discounts
     if (characterType === CharacterType.MILITARY && move === MoveType.SHIELD) cost = 1;
     if (characterType === CharacterType.MODEL_J && move === MoveType.DESTROY) cost = 3;
-    
-    // Upgrade Discounts ('UNDERCLOCK')
     const hasCostReduction = player.upgrades?.some(u => u.id === 'UNDERCLOCK');
     if (hasCostReduction && (move === MoveType.DESTROY || move === MoveType.FIELD)) {
         cost = Math.max(0, cost - 1);
     }
 
-    if (Math.floor(player.energy) < cost) return; // Use floor for comparison
+    if (Math.floor(player.energy) < cost) return;
 
-    // Update Player
+    // Fusion Core Bonus
+    let chargeAmount = 1;
+    if (player.upgrades?.some(u => u.chargeBonus)) chargeAmount += (player.upgrades.find(u => u.chargeBonus)?.chargeBonus || 0);
+
     setPlayer(prev => ({
       ...prev,
-      energy: move === MoveType.CHARGE ? prev.energy + 1 : prev.energy - cost,
+      energy: move === MoveType.CHARGE ? prev.energy + chargeAmount : prev.energy - cost,
       currentMove: move
     }));
-
-    // Determine Enemy Move
-    const enemyAction = getEnemyMove(enemy, player, gameMode === GameMode.CAMPAIGN ? campaignIndex + 1 : endlessScore);
     
-    // Calc Enemy Cost (Handle overrides in traits)
+    const enemyAction = getEnemyMove(
+        enemy, 
+        player, 
+        gameMode === GameMode.CAMPAIGN ? campaignIndex + 1 : endlessScore,
+        previousPlayerMove // Pass previous move for Mimic
+    );
+    
+    // Enemy Cost Calculation (simplified)
     let enemyCost = MOVE_COSTS[enemyAction];
     const trait = enemy.traits?.[0];
+    
+    // Special: Quick Draw
+    if (trait?.laserIsFree && enemyAction === MoveType.LASER) enemyCost = 0;
     if (enemyAction === MoveType.DESTROY && trait?.destroyCostOverride !== undefined) enemyCost = trait.destroyCostOverride;
     if (enemyAction === MoveType.FIELD && trait?.fieldCostOverride !== undefined) enemyCost = trait.fieldCostOverride;
     
-    // Boss Charge Override
     let enemyChargeAmt = 1;
     if (enemyAction === MoveType.CHARGE && trait?.chargeAmountOverride) enemyChargeAmt = trait.chargeAmountOverride;
 
@@ -270,31 +280,26 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
       currentMove: enemyAction 
     }));
 
+    audioManager.playMove(move);
+    audioManager.playMove(enemyAction);
+
     setTurnPhase(TurnPhase.RESOLVING);
   };
 
-  // Resolution Phase
   useEffect(() => {
     if (turnPhase === TurnPhase.RESOLVING) {
       const timer = setTimeout(() => {
         
-        // 1. Check Industrial Passive
         const isIndustrialBonus = (characterType === CharacterType.INDUSTRIAL && (roundCount % 3 === 0));
         if (isIndustrialBonus) {
            setBattleLog(prev => [...prev, ">> 工业型被动触发：自动加载防护罩！"]);
+           audioManager.playMove(MoveType.SHIELD);
         }
 
-        // 2. Resolve Turn
-        const result = resolveTurn(
-          player, 
-          enemy, 
-          roundCount
-        );
+        const result = resolveTurn(player, enemy, roundCount);
         
-        // 3. Handle Military Multi-Laser / Weapon Mod Upgrade
         const hasWeaponMod = player.upgrades?.some(u => u.id === 'WEAPON_MOD');
         let nextTurnDelayedDamage = 0;
-        
         if (player.currentMove === MoveType.LASER) {
              if (characterType === CharacterType.MILITARY) {
                  nextTurnDelayedDamage = 1;
@@ -305,33 +310,44 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
              }
         }
 
-        // Update HP
-        let newPlayerHP = player.hp - result.playerDmg;
-        let newEnemyHP = enemy.hp - result.enemyDmg;
+        let newPlayerHP = Math.min(player.maxHp, player.hp - result.playerDmg); // Allow healing from vampiric
+        let newEnemyHP = Math.min(enemy.maxHp, enemy.hp - result.enemyDmg + (result.enemyHeal || 0));
+        
+        // Apply Energy Changes (Leech)
+        let newPlayerEnergy = player.energy + (result.playerEnergyChange || 0);
+        let newEnemyEnergy = enemy.energy + (result.enemyEnergyChange || 0);
 
-        // Cap at 0
+        if (result.playerDmg > 0 || result.enemyDmg > 0) audioManager.playImpact();
         if (newPlayerHP < 0) newPlayerHP = 0;
         if (newEnemyHP < 0) newEnemyHP = 0;
 
         setPlayer(prev => ({ 
           ...prev, 
           hp: newPlayerHP, 
+          energy: Math.max(0, newPlayerEnergy),
           isDead: newPlayerHP === 0,
           delayedAttackDamage: nextTurnDelayedDamage 
         }));
 
-        setEnemy(prev => ({ ...prev, hp: newEnemyHP, isDead: newEnemyHP === 0 }));
+        setEnemy(prev => ({ 
+            ...prev, 
+            hp: newEnemyHP, 
+            energy: Math.max(0, newEnemyEnergy),
+            isDead: newEnemyHP === 0 
+        }));
         
         setBattleLog(prev => [...prev, `[Round ${roundCount}] ${result.message}`]);
+        
+        // Update Previous Move for next turn logic
+        setPreviousPlayerMove(player.currentMove);
+        
         setTurnPhase(TurnPhase.RESULT);
 
-      }, 1000); 
-
+      }, 500); 
       return () => clearTimeout(timer);
     }
-  }, [turnPhase]); // Keep dependencies minimal to avoid double triggers
+  }, [turnPhase]);
 
-  // Result Phase Check
   useEffect(() => {
     if (turnPhase === TurnPhase.RESULT) {
       const timer = setTimeout(() => {
@@ -340,8 +356,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
         } else if (enemy.isDead) {
            handleEnemyDefeated();
         } else {
-           // Continue Game
-           // Passives: J Type Regen (+1), Overclock (+0.5)
            const hasOverclock = player.upgrades?.some(u => u.id === 'OVERCLOCK');
            let energyGain = 0;
            if (characterType === CharacterType.MODEL_J) energyGain += 1;
@@ -356,17 +370,14 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
            setRoundCount(r => r + 1);
            setTurnPhase(TurnPhase.WAITING);
         }
-      }, 2000);
+      }, 1000);
       return () => clearTimeout(timer);
     }
   }, [turnPhase, player.isDead, enemy.isDead]);
 
-
-  // UI Helper for Buttons
   const ControlButton = ({ type }: { type: MoveType }) => {
     let cost = MOVE_COSTS[type];
     
-    // Apply Visual Cost Reductions
     if (characterType === CharacterType.MILITARY && type === MoveType.SHIELD) cost = 1;
     if (characterType === CharacterType.MODEL_J && type === MoveType.DESTROY) cost = 3;
     const hasCostReduction = player.upgrades?.some(u => u.id === 'UNDERCLOCK');
@@ -375,19 +386,23 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
     }
 
     const canAfford = Math.floor(player.energy) >= cost;
-    
     let isDisabled = false;
-    if (characterType === CharacterType.MODEL_J) {
-        if (type === MoveType.SHIELD) isDisabled = true;
-        if (type === MoveType.LASER) isDisabled = true;
+    let disabledReason = "禁用";
+    
+    // Character Restrictions
+    if (characterType === CharacterType.MODEL_J && (type === MoveType.SHIELD || type === MoveType.LASER)) isDisabled = true;
+    if (characterType === CharacterType.PROTOTYPE && (type === MoveType.DESTROY || type === MoveType.FIELD)) isDisabled = true;
+    if (characterType === CharacterType.INDUSTRIAL && type === MoveType.DESTROY) isDisabled = true;
+
+    // Trait Restriction: JAMMER
+    if (enemy.traits?.[0]?.blocksConsecutiveMoves && previousPlayerMove === type) {
+        isDisabled = true;
+        disabledReason = "干扰";
     }
     
-    // Labels
     let label = MOVE_NAMES[type];
-    if (type === MoveType.LASER) {
-        if (characterType === CharacterType.MILITARY || player.upgrades?.some(u => u.id === 'WEAPON_MOD')) {
-            label = "多重射击";
-        }
+    if (type === MoveType.LASER && (characterType === CharacterType.MILITARY || player.upgrades?.some(u => u.id === 'WEAPON_MOD'))) {
+        label = "多重射击";
     }
 
     let colorTheme = "gray";
@@ -409,11 +424,14 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
     const baseClass = (canAfford && !isDisabled)
       ? `${bgColors[colorTheme]} hover:brightness-125 text-white cursor-pointer transform hover:-translate-y-1 shadow-[0_0_10px_rgba(0,0,0,0.5)]` 
       : "bg-gray-900/80 border-gray-800 text-gray-600 cursor-not-allowed opacity-60 grayscale";
+    
+    // Fusion Core Visual
+    const chargeBonus = (type === MoveType.CHARGE && player.upgrades?.some(u => u.id === 'FUSION')) ? 2 : 1;
 
     if (isDisabled) {
         return (
             <button disabled className={`relative w-full h-24 rounded-xl border-2 border-gray-800 bg-black/80 flex flex-col items-center justify-center text-gray-700`}>
-                <span className="text-xs font-bold">禁用</span>
+                <span className="text-xs font-bold">{disabledReason}</span>
             </button>
         )
     }
@@ -425,9 +443,8 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
         className={`relative w-full h-24 rounded-xl border-2 flex flex-col items-center justify-center transition-all duration-200 group overflow-hidden ${baseClass}`}
       >
          <div className={`absolute top-2 right-2 text-xs font-black px-2 py-0.5 rounded ${canAfford ? 'bg-black/50 text-white' : 'bg-black/20 text-gray-600'}`}>
-            {type === MoveType.CHARGE ? '+1' : (cost === 0 ? '0' : `-${cost}`)} EN
+            {type === MoveType.CHARGE ? `+${chargeBonus}` : (cost === 0 ? '0' : `-${cost}`)} EN
          </div>
-
          <span className="text-2xl mb-1">
             {type === MoveType.CHARGE && '⚡'}
             {type === MoveType.LASER && '🔫'}
@@ -440,25 +457,20 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
     );
   };
 
-  // Boss Invincible Check
   const isBossInvincible = enemy.traits?.[0]?.isInvincibleOddTurns && (roundCount % 2 !== 0);
 
   return (
     <div className="w-full h-full flex flex-col relative z-10 max-h-screen overflow-hidden">
       <RoundOverlay levelName={levelName} round={roundCount} visible={showRoundOverlay} />
-      
       {upgradeOptions && (
           <UpgradeModal options={upgradeOptions} onSelect={handleUpgradeSelect} onSkip={() => { setUpgradeOptions(null); startNextEndlessRound(endlessScore); }} />
       )}
-
-      {/* Top Info Bar */}
       <div className="w-full p-4 flex justify-between items-center bg-black/60 backdrop-blur-md border-b border-white/10 shadow-lg z-20 shrink-0">
         <div className="flex flex-col md:flex-row md:items-center gap-2 relative">
             <div className="flex items-center gap-2">
                 <div className="w-3 h-3 bg-cyan-400 rounded-full animate-pulse"></div>
                 <div className="text-cyan-400 font-bold tracking-wider text-sm md:text-base">{charConfig.name}</div>
             </div>
-            {/* Player Upgrades Icons */}
             <div className="flex gap-1">
                 {player.upgrades?.map((u, i) => (
                     <div 
@@ -471,8 +483,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
                     </div>
                 ))}
             </div>
-            
-            {/* Player Tooltip */}
             {showPlayerTooltip && (
                 <div className="absolute top-10 left-0 w-64 bg-gray-900/95 border border-yellow-500/50 p-4 rounded-xl shadow-xl z-50 backdrop-blur-lg animate-in fade-in slide-in-from-top-2">
                     <h4 className="text-yellow-400 font-bold mb-1">{showPlayerTooltip.name}</h4>
@@ -480,7 +490,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
                 </div>
             )}
         </div>
-
         <div className="flex items-center gap-4">
              <div className="flex flex-col items-center">
                   <div className="text-2xl font-black text-white/20 tracking-[0.2em] italic">
@@ -488,21 +497,17 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
                   </div>
                   <div className="text-xs text-yellow-500">{levelName}</div>
              </div>
-             
-             {/* Quit Button */}
              <button 
-                onClick={onBackToMenu}
+                onClick={() => { audioManager.playUI(); onBackToMenu(); }}
                 className="ml-2 px-3 py-1 border border-red-900/50 bg-red-950/30 text-red-400 text-xs hover:bg-red-900/50 hover:text-red-200 rounded transition-all"
              >
                 退出
              </button>
         </div>
-        
-        {/* Enemy Info & Tooltip */}
         <div className="relative">
             <div 
                 className="flex items-center gap-2 cursor-help"
-                onMouseEnter={() => setShowEnemyTooltip(true)}
+                onMouseEnter={() => { audioManager.playUI('hover'); setShowEnemyTooltip(true); }}
                 onMouseLeave={() => setShowEnemyTooltip(false)}
             >
                 <div className="text-right">
@@ -515,36 +520,30 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
                 </div>
                 <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
             </div>
-
-            {/* Tooltip */}
             {showEnemyTooltip && enemy.traits && enemy.traits.length > 0 && (
                 <div className="absolute top-10 right-0 w-64 bg-gray-900/95 border border-red-500/50 p-4 rounded-xl shadow-xl z-50 backdrop-blur-lg animate-in fade-in slide-in-from-top-2">
                     <h4 className="text-red-400 font-bold mb-1">{enemy.traits[0].name}</h4>
                     <p className="text-xs text-gray-300 leading-relaxed">{enemy.traits[0].description}</p>
                     <div className="mt-2 pt-2 border-t border-white/10 text-[10px] text-gray-500">
-                        HP: {enemy.hp} | EN: {Math.floor(enemy.energy)}
+                        HP: {enemy.traits[0].hpRange[0]}-{enemy.traits[0].hpRange[1]}
                     </div>
                 </div>
             )}
         </div>
       </div>
-
-      {/* Game Area */}
       <div className="flex-1 flex items-center justify-between px-4 md:px-20 lg:px-40 relative shrink-0 min-h-[300px]">
         <Robot 
             {...player} 
-            energy={Math.floor(player.energy)} // Display integer energy
+            energy={Math.floor(player.energy)} 
             bonusShield={characterType === CharacterType.INDUSTRIAL && roundCount % 3 === 0}
             isPhantomFiring={(characterType === CharacterType.MILITARY || player.upgrades?.some(u => u.id === 'WEAPON_MOD')) && player.delayedAttackDamage! > 0 && turnPhase === TurnPhase.RESOLVING}
         />
         <Robot 
             {...enemy} 
             energy={Math.floor(enemy.energy)}
-            isInvincible={isBossInvincible}
+            isInvincible={isBossInvincible || (enemy.traits?.[0]?.periodicInvincibleField && roundCount % 3 !== 0)}
         />
       </div>
-
-      {/* Battle Log & Controls */}
       <div className="flex flex-col bg-black/80 backdrop-blur-lg border-t border-white/10 pb-safe shrink-0">
         <div className="h-32 overflow-y-auto px-4 py-2 border-b border-white/10 space-y-1 scrollbar-thin scrollbar-thumb-cyan-900 scrollbar-track-black">
             {battleLog.map((log, index) => (
@@ -554,7 +553,6 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
             ))}
             <div ref={logEndRef} />
         </div>
-
         <div className="p-4 pb-6 md:pb-8">
             <div className="grid grid-cols-5 gap-2 md:gap-4 max-w-5xl mx-auto">
             <ControlButton type={MoveType.CHARGE} />
@@ -565,24 +563,19 @@ const Game: React.FC<GameProps> = ({ characterType, gameMode, onBackToMenu }) =>
             </div>
         </div>
       </div>
-
-      {/* End Game Modal */}
       {endGameMessage && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md animate-in fade-in duration-500 px-4">
           <div className="bg-gradient-to-br from-gray-900 to-black border border-cyan-500/30 p-8 rounded-2xl max-w-lg w-full text-center shadow-[0_0_100px_rgba(34,211,238,0.15)] relative overflow-hidden">
             <div className={`absolute inset-0 opacity-20 ${player.isDead ? 'bg-red-500' : 'bg-cyan-500'}`}></div>
-            
             <h2 className={`text-4xl md:text-5xl font-black mb-8 relative ${player.isDead ? 'text-red-500' : 'text-cyan-400'} drop-shadow-lg`}>
                {player.isDead ? 'MISSION FAILED' : 'VICTORY'}
             </h2>
-            
             <div className="bg-black/40 p-6 rounded-xl border border-white/10 mb-8 backdrop-blur-sm relative">
                  <p className="text-lg md:text-xl text-white font-orbitron leading-relaxed">{endGameMessage}</p>
             </div>
-
             <div className="flex gap-4 justify-center relative">
                 <button 
-                    onClick={onBackToMenu}
+                    onClick={() => { audioManager.playUI(); onBackToMenu(); }}
                     className="px-8 py-3 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded text-lg tracking-widest shadow-lg transition-all hover:scale-105"
                 >
                     返回基地

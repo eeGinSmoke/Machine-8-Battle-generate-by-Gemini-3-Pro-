@@ -1,14 +1,8 @@
-import { MoveType, RobotState, TurnResult, EnemyTrait, CharacterType, PlayerUpgrade } from '../types';
+import { MoveType, RobotState, TurnResult, EnemyTrait, CharacterType } from '../types';
 import { TRAITS_EASY, TRAITS_MEDIUM, TRAITS_HARD, TRAITS_BOSS, MOVE_COSTS } from '../constants';
 
-/**
- * Helper to get random int between min and max (inclusive)
- */
 const randomInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-/**
- * Generates an enemy for Endless Mode based on current score.
- */
 export const generateEndlessEnemy = (score: number): RobotState => {
   let pool: EnemyTrait[] = TRAITS_EASY;
   let isBoss = false;
@@ -33,13 +27,10 @@ export const generateEndlessEnemy = (score: number): RobotState => {
     energy: trait.startEnergy || 0,
     currentMove: MoveType.NONE,
     isDead: false,
-    traits: [trait] // Store trait for logic
+    traits: [trait]
   };
 };
 
-/**
- * Calculates damage for a single interaction. 
- */
 const calculateInteraction = (
   attackerMove: MoveType, 
   defenderMove: MoveType, 
@@ -51,7 +42,7 @@ const calculateInteraction = (
       return 0; // Blocked
     }
     if (defenderMove === MoveType.LASER || defenderMove === MoveType.DESTROY || defenderMove === MoveType.CHARGE) {
-      return attackerLaserDmg; // Hit (Standard 1, Boss maybe 2)
+      return attackerLaserDmg;
     }
   }
 
@@ -68,9 +59,6 @@ const calculateInteraction = (
   return 0;
 };
 
-/**
- * Resolves the turn with complex character mechanics and traits.
- */
 export const resolveTurn = (
   player: RobotState,
   enemy: RobotState,
@@ -79,75 +67,114 @@ export const resolveTurn = (
   const playerMove = player.currentMove;
   const enemyMove = enemy.currentMove;
   
-  // Extract Traits / Upgrades
   const enemyTrait = enemy.traits?.[0];
   const playerUpgrades = player.upgrades || [];
   
-  // Player Status
   const isIndustrialBonus = (player.type === CharacterType.INDUSTRIAL && (roundCount % 3 === 0));
   const playerHasBonusShield = isIndustrialBonus;
   const playerDelayedDamage = player.delayedAttackDamage || 0;
   const hasActiveDefUpgrade = playerUpgrades.some(u => u.id === 'ACTIVE_DEF');
 
-  // Enemy Status
+  // Trait Flags
   const enemyReflects = enemyTrait?.reflectsDamage || false;
-  const enemyInvincible = enemyTrait?.isInvincibleOddTurns && (roundCount % 2 !== 0);
-  const enemyLaserDmg = enemyTrait?.laserDamageOverride || 1;
+  let enemyInvincible = enemyTrait?.isInvincibleOddTurns && (roundCount % 2 !== 0);
+  const enemyLaserDmg = enemyTrait?.laserDamageOverride || (enemyTrait?.punishCharge && playerMove === MoveType.CHARGE ? 2 : 1);
+  const enemyImmuneLaser = enemyTrait?.immuneToLaser || false;
+  const enemySteals = enemyTrait?.stealsEnergy || false;
+  const enemyRegens = enemyTrait?.regenerates || false;
+  
+  // Boss Firewall: Permanent field, but overloaded every 3rd turn
+  let enemyHasPermField = false;
+  if (enemyTrait?.periodicInvincibleField) {
+      if (roundCount % 3 === 0) {
+          // Overload! Vulnerable
+      } else {
+          enemyHasPermField = true;
+          enemyInvincible = false; // Handled by "HasPermField" logic blocks
+      }
+  }
 
   let playerDmg = 0;
   let enemyDmg = 0;
+  let playerEnergyChange = 0;
+  let enemyEnergyChange = 0;
+  let enemyHeal = 0;
   let messages: string[] = [];
 
-  if (enemyInvincible) {
-    messages.push("警告：BOSS处于无敌状态！所有攻击无效！");
-  }
+  if (enemyInvincible) messages.push("警告：BOSS处于无敌状态！");
+  if (enemyHasPermField) messages.push("敌方开启了最终防线力场！");
+  if (enemyTrait?.periodicInvincibleField && roundCount % 3 === 0) messages.push("敌方力场过载！防御失效！");
 
-  // --- 1. CLASH CHECK (Main Attacks) ---
-  // If both use the same attack, they cancel out. 
+  // Clash Check
   let mainAttackClash = false;
   if (playerMove === enemyMove && (playerMove === MoveType.LASER || playerMove === MoveType.DESTROY)) {
     mainAttackClash = true;
     messages.push("双方主武器火力相互抵消！");
+    
+    // Kinetic Recycler Upgrade
+    if (playerUpgrades.some(u => u.gainEnergyOnClash)) {
+        playerEnergyChange += 1;
+        messages.push("动能回收：获得1点能量");
+    }
   }
 
-  // --- 2. PLAYER MAIN ATTACK vs ENEMY ---
+  // --- PLAYER vs ENEMY ---
   if (!mainAttackClash) {
     let dmg = 0;
+    
+    // Laser
     if (playerMove === MoveType.LASER) {
-      dmg = calculateInteraction(MoveType.LASER, enemyMove, false);
+      // Critical Logic
+      let baseDmg = 1;
+      const critChance = playerUpgrades.find(u => u.criticalLaserChance)?.criticalLaserChance || 0;
+      if (critChance > 0 && Math.random() < critChance) {
+          baseDmg = 2;
+      }
+
+      // Firewall Logic: Equivalent to having FIELD
+      const effectiveEnemyMove = enemyHasPermField ? MoveType.FIELD : enemyMove;
       
-      // Handle Spike Trait (Reflect)
-      if (dmg === 0 && enemyReflects) {
-        if (enemyMove === MoveType.SHIELD) {
-            playerDmg += 1; 
-            messages.push("敌方带刺护盾反弹了伤害！(-1HP)");
-        } else if (enemyMove === MoveType.FIELD) {
-            playerDmg += 3;
-            messages.push("敌方带刺力场强烈反震！(-3HP)");
-        }
+      dmg = calculateInteraction(MoveType.LASER, effectiveEnemyMove, false, baseDmg);
+      
+      if (enemyImmuneLaser && dmg > 0) {
+          dmg = 0;
+          messages.push("敌方重型装甲免疫了激光伤害！");
+      } else if (dmg === 0 && enemyReflects) {
+        if (enemyMove === MoveType.SHIELD) { playerDmg += 1; messages.push("敌方护盾反弹伤害！(-1HP)"); }
+        else if (enemyMove === MoveType.FIELD) { playerDmg += 3; messages.push("敌方力场反弹伤害！(-3HP)"); }
       } else if (dmg > 0) {
-        messages.push("你的激光命中敌方！");
+        if (baseDmg === 2) messages.push("暴击！");
+        messages.push(baseDmg === 2 ? "你的激光造成双倍伤害！" : "你的激光命中敌方！");
       } else {
         messages.push("敌方防御了你的激光！");
       }
-    } else if (playerMove === MoveType.DESTROY) {
-      dmg = calculateInteraction(MoveType.DESTROY, enemyMove, false);
-      
-      if (dmg === 0 && enemyReflects && enemyMove === MoveType.FIELD) {
-        // Field blocks Destroy usually, Spiked reflects? 
-        // Rule says: "Field reflects 3". Destroy is blocked by field. So reflect logic applies.
+    } 
+    // Destroy
+    else if (playerMove === MoveType.DESTROY) {
+      const effectiveEnemyMove = enemyHasPermField ? MoveType.FIELD : enemyMove;
+      dmg = calculateInteraction(MoveType.DESTROY, effectiveEnemyMove, false);
+
+      if (dmg === 0 && enemyReflects && effectiveEnemyMove === MoveType.FIELD) {
         playerDmg += 3;
-        messages.push("敌方力场反弹了毁灭射线的余波！(-3HP)");
+        messages.push("敌方力场反弹毁灭射线！(-3HP)");
       } else if (dmg >= 5) {
-        messages.push("毁灭射线直击！造成重创！(5点伤害)");
+        messages.push("毁灭射线造成重创！(5点伤害)");
       } else if (dmg === 2) {
-        messages.push("毁灭射线贯穿了敌方护盾！(2点伤害)");
-        // Shield reflect (1 dmg) logic? 
-        // Destroy pierces shield. It's a hit (partial). 
-        // Let's say no reflect if pierced, or standard reflect? 
-        // Simplification: If pierced, shield failed, no reflect.
+        messages.push("毁灭射线贯穿护盾！(2点伤害)");
       } else {
         messages.push("毁灭射线被抵消或防御！");
+      }
+      
+      // Vampiric Beam
+      if (dmg > 0 && playerUpgrades.some(u => u.destroyHeals)) {
+          playerDmg -= 1; // "Heal" by reducing damage taken, effectively, or we need a way to heal. 
+          // TurnResult doesn't allow healing player directly easily except negative damage? 
+          // Better to handle via energy or just reduce playerDmg if taken, or we need to add 'playerHeal' to result.
+          // For simplicity: We can't easily add HP here without updating types everywhere, let's hack it as negative dmg if playerDmg > 0, OR log it and handle in Game.tsx?
+          // Wait, Game.tsx does: let newPlayerHP = player.hp - result.playerDmg;
+          // So playerDmg = -1 means heal 1.
+          playerDmg -= 2; // Heal 2
+          messages.push("吸血光束汲取了生命！(+2HP)");
       }
     }
 
@@ -156,141 +183,193 @@ export const resolveTurn = (
     }
   }
 
-  // --- 3. MILITARY/UPGRADE PASSIVE: DELAYED ATTACK (Phantom Laser) ---
+  // --- PHANTOM ATTACK ---
   if (playerDelayedDamage > 0) {
-    const phantomDmg = calculateInteraction(MoveType.LASER, enemyMove, false);
+    const effectiveEnemyMove = enemyHasPermField ? MoveType.FIELD : enemyMove;
+    const phantomDmg = calculateInteraction(MoveType.LASER, effectiveEnemyMove, false);
     if (phantomDmg > 0) {
-      if (!enemyInvincible) {
+      if (!enemyInvincible && !enemyImmuneLaser) {
         enemyDmg += phantomDmg;
-        messages.push("后续激光命中敌方！(无法被抵消)");
+        messages.push("后续激光命中！");
       } else {
-        messages.push("后续激光被无敌护盾挡下！");
+        messages.push("后续激光无效！");
       }
     } else {
-        if (enemyReflects && (enemyMove === MoveType.SHIELD || enemyMove === MoveType.FIELD)) {
-             // Reflect logic for phantom?
-             // Let's keep it simple: Phantom laser gets reflected too.
-             playerDmg += (enemyMove === MoveType.SHIELD ? 1 : 3);
+        if (enemyReflects && (effectiveEnemyMove === MoveType.SHIELD || effectiveEnemyMove === MoveType.FIELD)) {
+             playerDmg += (effectiveEnemyMove === MoveType.SHIELD ? 1 : 3);
              messages.push("后续激光被反弹！");
-        } else {
-             messages.push("敌方挡住了后续激光！");
         }
     }
   }
 
-  // --- 4. ENEMY ATTACK vs PLAYER ---
-  const effectivePlayerDefense = playerHasBonusShield ? true : false;
+  // --- ENEMY vs PLAYER ---
+  const effectivePlayerDefense = playerHasBonusShield;
 
   if (!mainAttackClash) {
     if (enemyMove === MoveType.LASER) {
-      // Check explicit block
       if (playerMove === MoveType.SHIELD || playerMove === MoveType.FIELD || effectivePlayerDefense) {
         messages.push("你防御了敌方激光！");
-        // Player Active Defense Upgrade
+        // Siphon Upgrade
+        if (playerUpgrades.some(u => u.shieldAbsorbs)) {
+            playerEnergyChange += 1;
+            messages.push("能量虹吸：吸收能量！(+1EN)");
+        }
         if (hasActiveDefUpgrade && (playerMove === MoveType.SHIELD || effectivePlayerDefense)) {
-            if (!enemyInvincible) {
+            if (!enemyInvincible && !enemyHasPermField) {
                 enemyDmg += 1;
-                messages.push("你的超级主动防御反弹了伤害！");
+                messages.push("你的护盾反弹了伤害！");
             }
         }
       } else if (playerMove === MoveType.LASER || playerMove === MoveType.DESTROY || playerMove === MoveType.CHARGE) {
-        playerDmg += enemyLaserDmg;
-        messages.push(`敌方激光命中了你！(-${enemyLaserDmg}HP)`);
+        // Lucky Coating
+        const dodgeChance = playerUpgrades.find(u => u.chanceToDodgeLaser)?.chanceToDodgeLaser || 0;
+        if (Math.random() < dodgeChance) {
+             messages.push("幸运涂层闪避了激光伤害！");
+        } else {
+             playerDmg += enemyLaserDmg;
+             messages.push(`敌方激光命中！(-${enemyLaserDmg}HP)`);
+             // Energy Leech
+             if (enemySteals) {
+                 playerEnergyChange -= 1;
+                 enemyEnergyChange += 1;
+                 messages.push("能量被窃取！(EN -1)");
+             }
+        }
       }
     } else if (enemyMove === MoveType.DESTROY) {
       if (playerMove === MoveType.FIELD || playerMove === MoveType.DESTROY) {
         messages.push("敌方毁灭射线无效化！");
+         // Siphon Upgrade (Field works vs Destroy)
+         if (playerMove === MoveType.FIELD && playerUpgrades.some(u => u.shieldAbsorbs)) {
+            playerEnergyChange += 1;
+            messages.push("能量虹吸：吸收能量！(+1EN)");
+        }
       } else if (playerMove === MoveType.SHIELD || effectivePlayerDefense) {
         playerDmg += 2;
-        messages.push("敌方毁灭射线贯穿你的护盾！(2点伤害)");
+        messages.push("敌方毁灭射线贯穿护盾！(2点伤害)");
       } else {
         playerDmg += 5;
-        messages.push("敌方毁灭射线直击！你受到了重创！(5点伤害)");
+        messages.push("敌方毁灭射线直击！(5点伤害)");
       }
     }
+  }
+
+  // --- TRAIT: REGENERATOR ---
+  if (enemyRegens && enemyDmg === 0 && enemy.hp < enemy.maxHp) {
+      enemyHeal = 1;
+      messages.push("敌方再生核心启动，恢复生命！(+1HP)");
+  }
+
+  // --- TRAIT: UNSTABLE REACTOR ---
+  if (enemyTrait?.randomDestroySelfDmg && enemyMove === MoveType.DESTROY) {
+      enemyDmg += 1;
+      messages.push("敌方反应堆过热自损！(-1HP)");
   }
 
   return {
     playerDmg,
     enemyDmg,
     message: messages.join(' '),
+    playerEnergyChange,
+    enemyEnergyChange,
+    enemyHeal
   };
 };
 
-/**
- * AI Logic with Traits
- */
-export const getEnemyMove = (enemyState: RobotState, playerState: RobotState, levelOrScore: number): MoveType => {
+export const getEnemyMove = (
+    enemyState: RobotState, 
+    playerState: RobotState, 
+    levelOrScore: number,
+    playerPreviousMove: MoveType = MoveType.NONE
+): MoveType => {
   const eEnergy = Math.floor(enemyState.energy);
   const pEnergy = Math.floor(playerState.energy);
   const trait = enemyState.traits?.[0];
 
-  // --- Optimization: Low Energy Priority ---
-  // If energy is 0, bias heavily towards CHARGE to prevent stalling or stupid moves
+  // Low Energy Priority
   if (eEnergy < 1) {
-      // Some traits might start with energy (Out of Control), but if they hit 0, they must charge.
-      // Death Star auto-charges but might need manual boost.
-      // Unless trait restricts it?
       if (Math.random() < 0.9) return MoveType.CHARGE;
   }
 
-  const canShield = !trait?.cantUseShield && !trait?.onlyChargeAndDestroy && !trait?.isInvincibleOddTurns;
-  const canLaser = !trait?.cantUseLaser && !trait?.onlyChargeAndDestroy;
-  const canField = !trait?.cantUseField && !trait?.onlyChargeAndDestroy;
+  // --- T3: MIMIC ---
+  if (trait?.mimicPlayer) {
+      // First turn random, else copy
+      if (playerPreviousMove !== MoveType.NONE) {
+          // Check if has energy to copy
+          const cost = MOVE_COSTS[playerPreviousMove];
+          if (eEnergy >= cost) return playerPreviousMove;
+          return MoveType.CHARGE; // Fallback
+      }
+  }
+
+  // --- T3: UNSTABLE REACTOR ---
+  if (trait?.randomDestroySelfDmg) {
+      // 50% chance to destroy if alive
+      if (Math.random() < 0.5) return MoveType.DESTROY; 
+      // Else normal AI
+  }
+
+  // --- BOSS: TACTICAL AI ---
+  if (trait?.cheats) {
+      if (Math.random() < 0.3) {
+          // Counter player's current move (Passed in PlayerState ideally, but here we predict or cheat)
+          // Since we don't pass current move, we can simulate "prediction" or just use standard logic
+          // Let's make it smart based on Player Energy:
+          if (pEnergy >= 5) return MoveType.FIELD; // Expect Destroy
+          if (pEnergy < 1) return MoveType.LASER; // Punish Charge
+      }
+  }
+
+  const canShield = !trait?.cantUseShield && !trait?.onlyChargeAndDestroy && !trait?.isInvincibleOddTurns && !trait?.periodicInvincibleField;
+  const canLaser = !trait?.cantUseLaser && !trait?.onlyChargeAndDestroy && !trait?.periodicInvincibleField;
+  const canField = !trait?.cantUseField && !trait?.onlyChargeAndDestroy && !trait?.periodicInvincibleField;
   
   const destroyCost = trait?.destroyCostOverride ?? 5;
   const fieldCost = trait?.fieldCostOverride ?? 3;
 
-  // Trait Specific Logic
+  // Special: Quick Draw
+  if (trait?.laserIsFree && canLaser) {
+      if (Math.random() < 0.7) return MoveType.LASER;
+  }
 
-  // 1. Exploder: Only Charge or Destroy
+  // Standard AI Logic
   if (trait?.onlyChargeAndDestroy) {
       if (eEnergy >= destroyCost) return MoveType.DESTROY;
       return MoveType.CHARGE;
   }
 
-  // 2. Out of Control: Force Multi Attack (Laser usually)
   if (trait?.forceMultiAttack) {
-      // If has energy for laser, shoot. If high energy, destroy?
-      // "Attack becomes multi-attack" usually implies Laser.
       if (eEnergy >= destroyCost && Math.random() > 0.5) return MoveType.DESTROY;
       if (eEnergy >= 1) return MoveType.LASER;
       return MoveType.CHARGE;
   }
 
-  // 3. Death Star
   if (trait?.id === 'DEATH_STAR') {
       if (eEnergy >= destroyCost) return MoveType.DESTROY;
       return MoveType.CHARGE;
   }
 
-  // General Logic tailored by traits
-  // Berserker (No Shield)
   if (trait?.id === 'BERSERKER') {
       if (eEnergy >= destroyCost) return MoveType.DESTROY;
-      if (eEnergy >= 1 && Math.random() < 0.8) return MoveType.LASER; // Aggressive
+      if (eEnergy >= 1 && Math.random() < 0.8) return MoveType.LASER;
       return MoveType.CHARGE;
   }
 
-  // Standard logic fallback
-  // Kill / Heavy Damage
   if (eEnergy >= destroyCost) {
-    if (pEnergy >= 3 && Math.random() < 0.3) return MoveType.CHARGE; // Bait
+    if (pEnergy >= 3 && Math.random() < 0.3) return MoveType.CHARGE; 
     return MoveType.DESTROY;
   }
 
-  // Survival
   if (pEnergy >= 5) {
     if (canField && eEnergy >= fieldCost && Math.random() > 0.1) return MoveType.FIELD;
-    if (eEnergy >= destroyCost) return MoveType.DESTROY; // Counter
+    if (eEnergy >= destroyCost) return MoveType.DESTROY; 
     if (canShield && enemyState.hp > 2) return MoveType.SHIELD;
   }
 
   const availableMoves: MoveType[] = [MoveType.CHARGE];
-  if (canLaser && eEnergy >= 1) availableMoves.push(MoveType.LASER);
+  if (canLaser && (eEnergy >= 1 || trait?.laserIsFree)) availableMoves.push(MoveType.LASER);
   if (canShield) availableMoves.push(MoveType.SHIELD);
 
-  // Low Power trait favors charging
   if (trait?.id === 'LOW_POWER' && Math.random() < 0.6) return MoveType.CHARGE;
 
   if (Math.random() < 0.5) return MoveType.CHARGE;
