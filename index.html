@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Machine 8 War</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+      body {
+        font-family: 'Orbitron', sans-serif;
+        background-color: #050505;
+        color: white;
+        overflow: hidden;
+      }
+      .star {
+        position: absolute;
+        background: white;
+        border-radius: 50%;
+      }
+      @keyframes twinkle {
+        0%, 100% { opacity: 0.5; }
+        50% { opacity: 1; }
+      }
+      @keyframes float {
+        0% { transform: translateY(0px); }
+        50% { transform: translateY(-10px); }
+        100% { transform: translateY(0px); }
+      }
+      .animate-float {
+        animation: float 3s ease-in-out infinite;
+      }
+      
+      /* Attack Animations */
+      @keyframes laser-shoot {
+        0% { transform: scaleX(0); opacity: 1; }
+        15% { transform: scaleX(1); opacity: 1; }
+        60% { opacity: 1; }
+        100% { transform: scaleX(1); opacity: 0; }
+      }
+      .animate-laser {
+        animation: laser-shoot 0.5s cubic-bezier(0, 0, 0.2, 1) forwards;
+      }
+      
+      @keyframes destroy-fire {
+        0% { transform: scaleX(0) scaleY(0.1); opacity: 0.5; filter: hue-rotate(0deg); }
+        30% { transform: scaleX(1) scaleY(1.5); opacity: 1; filter: hue-rotate(45deg); }
+        80% { opacity: 1; }
+        100% { transform: scaleX(1) scaleY(0); opacity: 0; }
+      }
+      .animate-destroy {
+        animation: destroy-fire 1.2s ease-out forwards;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
